@@ -53,9 +53,10 @@ token = os.getenv('token', "bruh")
 printer_ip = os.getenv('printer_ip', "192.168.69.56")
 printer_profile = os.getenv('printer_profile', "TM-T88V")
 allowed_role_id = int(os.getenv('allowed_role_id', "975115151437103236"))
+verbosity_to_discord = True
 # Sane enough defaults
 
-allowed_role_ids = [allowed_role_id, 1294376414547673161, 1472742124566089871, 1396670499848982528] # List of allowed role IDs, mostly for including more roles than just the one in dotenv
+allowed_role_ids = [allowed_role_id, 1294376414547673161, 1472742124566089871, 1396670499848982528, 1472772089516921026] # List of allowed role IDs, mostly for including more roles than just the one in dotenv
 
 supported_pil_image_types = (".png", ".jpg", ".jpeg", ".j2k", ".jpx", ".bmp", ".webp", ".tiff")
 
@@ -81,26 +82,30 @@ async def print_message(ctx: discord.ApplicationContext, texttoprint: str):
         raise commands.CheckFailure
     callerDisplayname = member.display_name
     callerUsername = member.name
+
+    msg = await ctx.respond(f"Preparing to print your text")
     print(f"[print] User '{callerDisplayname} ({callerUsername})' is printing message: {texttoprint}")
     try:
         if len(texttoprint) > 200:
             raise ValueError("The text to print is too long. Please limit it to 200 characters")
         
+        if verbosity_to_discord: await msg.edit("Connecting to the printer... (1/2)")
         printer = Network(printer_ip, profile=printer_profile)
         printer.open()
         if printer.paper_status() == 0:
             printer.close()
             raise Exception("There is no paper in the printer")
         print("[print] Opened printer")
+        if verbosity_to_discord: await msg.edit("Connected, now printing your text... (2/2)")
         printer.text(f"Message from '{callerDisplayname} ({callerUsername})':\n{texttoprint}\n")
         printer.cut()
         printer.close()
         print("[print] Closed printer")
     except Exception as e:
         print(repr(e))
-        await ctx.respond(f"An error occurred while trying to print: {repr(e)}")
+        await msg.edit(f"An error occurred while trying to print: {repr(e)}")
         return
-    await ctx.respond(f"Message '{texttoprint}' printed successfully")
+    await msg.edit(f"Message '{texttoprint}' printed successfully")
 
 @bot.slash_command(name="image", description="Print an image on the printer (30 second cooldown)")
 @commands.cooldown(1, 30, commands.BucketType.user) 
@@ -116,19 +121,23 @@ async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Att
     callerUsername = member.name
     imagename = imagetoprint.filename
 
+    msg = await ctx.respond(f"Preparing to print your image {imagename}")
     print(f"[image] User '{callerDisplayname} ({callerUsername})' is printing an image {imagename}")
+
     try:
-        if not imagename.endswith(supported_pil_image_types):
+        if not imagename.lower().endswith(supported_pil_image_types):
             raise ValueError(f"The file {imagename} is not an image. Supported types are: {(', '.join(supported_pil_image_types))}")
         print(f"[image] File is of type {(', '.join(supported_pil_image_types))}")
         
+        if verbosity_to_discord: await msg.edit("Downloading your image (1/4)")
+        print("[image] Downloading image")
         remote_file = requests.get(imagetoprint.url)
-        print("[image] Downloaded image")
 
         image = Image.open(BytesIO(remote_file.content))
         print("[image] Image opened")
         # open image from file
 
+        if verbosity_to_discord: await msg.edit("Applying processing to your image (2/4)")
         if not image.width < image.height:
             print("[image] Image is wide, rotating to landscape")
             image = image.rotate(270, expand=True)
@@ -158,6 +167,7 @@ async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Att
         discordFile = discord.File(fp=byteImage, filename=imagename, description="Image uploaded for printing")
         print("[image] Created discord file object from processed image")
         
+        if verbosity_to_discord: await msg.edit("Connecting to the printer... (3/4)")
         printer = Network(printer_ip, profile=printer_profile)
         printer.open()
         if printer.paper_status() == 0:
@@ -165,6 +175,7 @@ async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Att
             raise Exception("There is no paper in the printer")
         print("[image] Opened printer")
         try:
+            if verbosity_to_discord: await msg.edit("Connected, now printing your image... (4/4)")
             printer.text(f"Image from '{callerDisplayname} ({callerUsername})':\n")
             printer.image(image, center=True, impl='graphics')
             printer.cut()
@@ -175,9 +186,10 @@ async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Att
             raise e
     except Exception as e:
         print(repr(e))
-        await ctx.respond(f"An error occurred while trying to print image: {repr(e)}")
+        await msg.edit(f"An error occurred while trying to print your image: {repr(e)}")
+        #await ctx.respond(f"An error occurred while trying to print image: {repr(e)}")
         return
-    await ctx.respond(f"Image {imagename} printed successfully", file=discordFile)
+    await msg.edit(f"Image {imagename} printed successfully", file=discordFile)
 
 @bot.slash_command(name="supportedimagetypes", description="Check what types of images are supported")
 async def supported_image_types(ctx: discord.ApplicationContext):
@@ -196,7 +208,9 @@ async def supported_image_types(ctx: discord.ApplicationContext):
 @commands.cooldown(1, 10, commands.BucketType.user) 
 async def paper_status(ctx: discord.ApplicationContext):
     await ctx.defer()
+    msg = await ctx.respond("Checking the paper status")
     try:
+        if verbosity_to_discord: await msg.edit("Connecting to the printer... (1/1)")
         printer = Network(printer_ip, profile=printer_profile)
         printer.open()
         print("[paper_status] Opened printer")
@@ -204,9 +218,9 @@ async def paper_status(ctx: discord.ApplicationContext):
         printer.close()
     except Exception as e:
         print(repr(e))
-        await ctx.respond(f"An error occurred while getting paper status: {repr(e)}")
+        await msg.edit(f"An error occurred while getting paper status: {repr(e)}")
         return
-    await ctx.respond(f"Paper Status: {paper_status}")
+    await msg.edit(f"Paper Status: {paper_status}")
 
 @bot.slash_command(name="chat", description="Send a message to chat")
 @option("texttoprint", description="The text you want to send (500 character limit)", required=True)
