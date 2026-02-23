@@ -1,15 +1,75 @@
-import discord
 import os
+import configparser
+from pathlib import Path
+from io import BytesIO
+
 import requests
-from dotenv import load_dotenv
+import discord
 from discord import option
 from discord.ext import commands
 from escpos.printer import Network
 from PIL import Image
 from PIL import ImageEnhance
-from io import BytesIO
 
-load_dotenv() # load all the variables from the env file
+from multitone import main as multitoneImage
+
+print("[escpos-printer-bot] hello welcome to bot, it is initializing")
+
+class ConfigManager:
+    def __init__(self, config_file='escpos-printer-bot.ini'):
+        self.config = configparser.ConfigParser(allow_no_value=True)
+
+        if not Path(config_file).exists():
+            print("[ConfigManager] The config file was not found, creating one now")
+            try:
+                self.write_config(config_file)
+            except Exception as e:
+                print(f"[ConfigManager] Error while writing config: {repr(e)}")
+                exit(1)
+            print("[ConfigManager] The config file has been created, please configure it and then restart the bot")
+            exit(0)
+        self.config.read(config_file)
+
+    def get_discord_config(self):
+        discord = self.config['Discord']
+        try:
+            return {
+                'token': discord.get('token'),
+                'allowed_role_ids': discord.get('allowed_role_ids'),
+                'verbosity_to_discord': discord.getboolean('verbosity_to_discord')
+            }
+        except Exception as e:
+            print(f"[ConfigManager] Error while reading Discord config: {repr(e)}")
+            exit(1)
+    
+    def get_printer_config(self):
+        print = self.config['Printer']
+        try:
+            return {
+                'ip': print.get('ip'),
+                'profile': print.get('profile'),
+                'enable_multitone': print.getboolean('enable_multitone')
+            }
+        except Exception as e:
+            print(f"[ConfigManager] Error while reading Printer config: {repr(e)}")
+            exit(1)
+    
+    def write_config(self, config_file):
+        self.config.add_section('Discord')
+        self.config.set('Discord', '; Set your bot token, IDs of roles which are allowed to use the bot SEPARATED BY COMMA, and whether the bot should report the current state')
+        self.config.set('Discord', 'token', '1234')
+        self.config.set('Discord', 'allowed_role_ids', '1234')
+        self.config.set('Discord', 'verbosity_to_discord', 'true')
+
+        self.config.add_section('Printer')
+        self.config.set('Printer', 'ip', "192.168.69.56")
+        self.config.set('Printer', 'profile', "TM-T88V")
+        self.config.set('Printer', 'enable_multitone', 'true')
+        self.config.set('Printer', '; Enable multitone printing only on printers with hardware support.')
+        self.config.set('Printer', '; For supported printers see https://github.com/dalpil/epson-multi-tone#epson-printers-with-4-bit-multi-tone-support')
+
+        with open(config_file, 'w') as file:
+            self.config.write(file)
 
 def parse_paper_status(status):
     print(f"[parse_paper_status] Received paper status: {status}")
@@ -47,18 +107,27 @@ def calculate_brightness_enhancement(brightness, max_enhancement=5):
     """
     return 1.0 + (1.0 - brightness) ** 3.9 * (max_enhancement - 1.0)
 
+config = ConfigManager()
 
+discordConfig = config.get_discord_config()
+token = discordConfig["token"]
+allowed_role_ids = list(map(int, str(discordConfig["allowed_role_ids"]).split(',')))
+#this is ugly but! get role ids str -> split by comma to list -> turn list strs into int
+verbosity_to_discord = discordConfig["verbosity_to_discord"]
 
-token = os.getenv('token', "bruh")
-printer_ip = os.getenv('printer_ip', "192.168.69.56")
-printer_profile = os.getenv('printer_profile', "TM-T88V")
-allowed_role_id = int(os.getenv('allowed_role_id', "975115151437103236"))
-verbosity_to_discord = True
-# Sane enough defaults
+printerConfig = config.get_printer_config()
+printer_ip = printerConfig["ip"]
+printer_profile = printerConfig["profile"]
+enable_multitone = printerConfig["enable_multitone"]
 
-allowed_role_ids = [allowed_role_id, 1294376414547673161, 1472742124566089871, 1396670499848982528, 1472772089516921026] # List of allowed role IDs, mostly for including more roles than just the one in dotenv
+if None in [allowed_role_ids, verbosity_to_discord, printer_ip, printer_profile, enable_multitone]:
+    print("[escpos-printer-bot] Couldn't find a required configuration option, check your configuration file!")
+
+print(f"[escpos-printer-bot] Read configuration, seems to be valid! The configuration is:\n                     Discord: Allowed roles are {allowed_role_ids} and verbosity to discord is {verbosity_to_discord}\n                     Printer: IP is {printer_ip}, profile is {printer_profile} and multitoning is {enable_multitone}")
 
 supported_pil_image_types = (".png", ".jpg", ".jpeg", ".j2k", ".jpx", ".bmp", ".webp", ".tiff")
+
+print("[escpos-printer-bot] Now starting the bot")
 
 bot = discord.Bot()
 
@@ -70,8 +139,8 @@ async def on_ready():
 async def hello(ctx: discord.ApplicationContext):
     await ctx.respond("Hello from escpos-printer-bot")
 
-@bot.slash_command(name="print", description="Print a message on the printer (30 second cooldown)")
-@commands.cooldown(1, 30, commands.BucketType.user) 
+@bot.slash_command(name="print", description="Print a message on the printer (5 second cooldown)")
+@commands.cooldown(1, 5, commands.BucketType.user) 
 @option("texttoprint", description="The text you want to print (200 character limit)", required=True)
 async def print_message(ctx: discord.ApplicationContext, texttoprint: str):
     await ctx.defer()
@@ -107,10 +176,11 @@ async def print_message(ctx: discord.ApplicationContext, texttoprint: str):
         return
     await msg.edit(f"Message '{texttoprint}' printed successfully")
 
-@bot.slash_command(name="image", description="Print an image on the printer (30 second cooldown)")
-@commands.cooldown(1, 30, commands.BucketType.user) 
+@bot.slash_command(name="image", description="Print an image on the printer (15 second cooldown)")
+@commands.cooldown(1, 15, commands.BucketType.user) 
 @option("imagetoprint", type=discord.Attachment, description="The image you want to print", required=True)
-async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Attachment):
+@option("multitone", type=bool, description="Higher quality by using 8 shades of gray instead of 2", required=False)
+async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Attachment, multitone: bool = False):
     await ctx.defer()
     member = ctx.guild.get_member(ctx.author.id)
     if not member or not any(role_id in [role.id for role in member.roles] for role_id in allowed_role_ids):
@@ -145,15 +215,15 @@ async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Att
         #Acquire image, rotate and grayscale it
 
         brightness = calculate_brightness(image)
-        #print(f"[image] Calculated brightness: {brightness}")
+        print(f"[image] Calculated brightness: {brightness}")
         brightness_enhancement = calculate_brightness_enhancement(brightness)
-        #print(f"[image] Calculated brightness enhancement: {brightness_enhancement}")
+        print(f"[image] Calculated brightness enhancement: {brightness_enhancement}")
         brightnessfilter = ImageEnhance.Brightness(image)
         image = brightnessfilter.enhance(brightness_enhancement)
         # Calculate brightness to apply and apply it
     
         contrastfilter = ImageEnhance.Contrast(image)
-        image = contrastfilter.enhance(0.7)
+        image = contrastfilter.enhance(0.8)
         #screenshot = screenshot.quantize(colors=8)
         # Reduce contrast a bit
 
@@ -166,6 +236,18 @@ async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Att
         byteImage.seek(0)
         discordFile = discord.File(fp=byteImage, filename=imagename, description="Image uploaded for printing")
         print("[image] Created discord file object from processed image")
+
+        if multitone:
+            if not enable_multitone:
+                raise Exception("Multitoning is disabled in the configuration")
+            print("[image] Processing multitone")
+            contrastfilter = ImageEnhance.Contrast(image)
+            image = contrastfilter.enhance(0.7)
+            brightnessfilter = ImageEnhance.Brightness(image)
+            image = brightnessfilter.enhance(1.28)
+
+            tempBytes = BytesIO()
+            tempBytes = multitoneImage(image=image, output_file=None, output_image=None, num_lines=100, resize=None, sharpness=None, contrast=None, cut=None, speed=1, heads_energizing=1, loglevel="INFO")
         
         if verbosity_to_discord: await msg.edit("Connecting to the printer... (3/4)")
         printer = Network(printer_ip, profile=printer_profile)
@@ -177,7 +259,14 @@ async def print_image(ctx: discord.ApplicationContext, imagetoprint: discord.Att
         try:
             if verbosity_to_discord: await msg.edit("Connected, now printing your image... (4/4)")
             printer.text(f"Image from '{callerDisplayname} ({callerUsername})':\n")
-            printer.image(image, center=True, impl='graphics')
+            if multitone:
+                print("[image] Printing multitone")
+                printer._raw(tempBytes)
+                printer.set_with_default()
+            else:
+                print("[image] Printing normal")
+                printer.image(image, center=True, impl='graphics')
+            
             printer.cut()
             printer.close()
             print("[image] Closed printer")
